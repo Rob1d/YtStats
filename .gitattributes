@@ -1,0 +1,6 @@
+githubPages/* linguist-vendored
+
+*.js linguist-vendored
+*.wasm linguist-vendored
+
+generated/ linguist-vendored
