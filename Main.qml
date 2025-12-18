@@ -13,17 +13,15 @@ ApplicationWindow {
 
         Text {
             anchors.centerIn: parent
-            text: "Qt QML running on WebAssembly!"
+            text: "Qt QML running on ype"
             color: "white"
             font.pixelSize: 24
         }
 
-        Button {
+        FileLoaderBtn {
             anchors.bottom: parent.bottom
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.bottomMargin: 20
-            text: "Click Me"
-            onClicked: parent.color = Qt.rgba(Math.random(), Math.random(), Math.random(), 1)
         }
     }
 }

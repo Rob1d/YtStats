@@ -4,7 +4,7 @@ project(YtStats VERSION 0.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Quick QuickControls2)
+find_package(Qt6 REQUIRED COMPONENTS Quick QuickControls2 QuickDialogs2)
 
 qt_standard_project_setup(REQUIRES 6.8)
 
@@ -15,9 +15,16 @@ qt_add_executable(appYtStats
 qt_add_qml_module(appYtStats
     URI YtStats
     VERSION 1.0
+    SOURCES
+        modules/FileLoader/FileLoader.hpp
+        modules/FileLoader/FileLoader.cpp
     QML_FILES
         Main.qml
+        modules/FileLoader/FileLoaderBtn.qml
 )
+
+target_include_directories(appYtStats PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+${CMAKE_CURRENT_SOURCE_DIR}/modules/FileLoader)
 
 # Qt for iOS sets MACOSX_BUNDLE_GUI_IDENTIFIER automatically since Qt 6.1.
 # If you are developing for iOS or macOS you should consider setting an

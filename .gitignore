@@ -3,3 +3,5 @@ build*
 YtStats/
 *.user
 notes.md
+.vscode/
+*.log
