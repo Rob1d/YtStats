@@ -16,22 +16,7 @@ Item {
         text: "Loaded File " + fileLoader.fileName
         anchors.centerIn: parent
         onClicked: {
-            fileDialog.open()
-        }
-    }
-    FileDialog {
-        id: fileDialog
-        title: "Select a File"
-        
-        nameFilters: ["Text files (*.txt)", "All files (*)"] 
-
-        onAccepted: {
-            console.log("You chose: " + fileDialog.currentFile)
-            fileLoader.loadFile(fileDialog.currentFile)
-        }
-
-        onRejected: {
-            console.log("File selection canceled")
+            fileLoader.openFileDialog()
         }
     }
 }

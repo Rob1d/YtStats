@@ -18,6 +18,8 @@ public slots:
 
     void setCurrentFile(const QString &fileName);
 
+    void openFileDialog();
+
 signals:
     void currentFileChanged();
 
