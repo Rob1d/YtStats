@@ -24,8 +24,29 @@ void FileLoader::openFileDialog()
         }
         else
         {
-            this->setCurrentFile(fileName);
+            try
+            {
+                this->setCurrentFile(fileName);
+                JsonSerializerVisitor serializer(fileContent);
+                auto history = serializer.visitHistory();
+                auto videos = history->videos();
+                for (auto it = videos.begin(); it != videos.end(); ++it)
+                {
+                    qDebug() << "Video title :" << (*it)->title();
+                }
+            }
+            catch (const std::exception &e)
+            {
+                qDebug() << "Exception occured :" << e.what();
+            }
         }
     };
-    QFileDialog::getOpenFileContent("Documents (*.json *.html)", fileContentReady);
+    try
+    {
+        QFileDialog::getOpenFileContent("Documents (*.json *.html)", fileContentReady);
+    }
+    catch (const std::exception &e)
+    {
+        qDebug() << "Exception occured :" << e.what();
+    }
 }

@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QQmlEngine>
+#include "../Parser/Json/JsonSerializerVisitor.hpp"
 
 class FileLoader : public QObject
 {

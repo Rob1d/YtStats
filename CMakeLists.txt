@@ -18,13 +18,27 @@ qt_add_qml_module(appYtStats
     SOURCES
         modules/FileLoader/FileLoader.hpp
         modules/FileLoader/FileLoader.cpp
+        modules/History/History.cpp
+        modules/History/History.hpp
+        modules/Video/Video.cpp
+        modules/Video/Video.hpp
+        modules/Parser/Json/JsonSerializerVisitor.hpp
+        modules/Parser/Json/JsonSerializerVisitor.cpp
+        modules/Parser/ISerializable.hpp
+        modules/Parser/ISerializerVisitor.hpp
+
     QML_FILES
         Main.qml
         modules/FileLoader/FileLoaderBtn.qml
 )
 
 target_include_directories(appYtStats PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
-${CMAKE_CURRENT_SOURCE_DIR}/modules/FileLoader)
+${CMAKE_CURRENT_SOURCE_DIR}/modules/FileLoader
+${CMAKE_CURRENT_SOURCE_DIR}/modules/History
+${CMAKE_CURRENT_SOURCE_DIR}/modules/Video
+${CMAKE_CURRENT_SOURCE_DIR}/modules/Parser/Json
+${CMAKE_CURRENT_SOURCE_DIR}/modules/Parser
+)
 
 # Qt for iOS sets MACOSX_BUNDLE_GUI_IDENTIFIER automatically since Qt 6.1.
 # If you are developing for iOS or macOS you should consider setting an
