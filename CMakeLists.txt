@@ -22,6 +22,8 @@ qt_add_qml_module(appYtStats
         modules/History/History.hpp
         modules/Video/Video.cpp
         modules/Video/Video.hpp
+        modules/Channel/Channel.hpp
+        modules/Channel/Channel.cpp
         modules/Parser/Json/JsonSerializerVisitor.hpp
         modules/Parser/Json/JsonSerializerVisitor.cpp
         modules/Parser/ISerializable.hpp
@@ -31,6 +33,10 @@ qt_add_qml_module(appYtStats
         Main.qml
         modules/FileLoader/FileLoaderBtn.qml
 )
+
+target_compile_options(appYtStats PRIVATE -fexceptions)
+
+target_link_options(appYtStats PRIVATE -fexceptions)
 
 target_include_directories(appYtStats PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 ${CMAKE_CURRENT_SOURCE_DIR}/modules/FileLoader

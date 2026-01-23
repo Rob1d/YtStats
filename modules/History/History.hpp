@@ -2,23 +2,32 @@
 
 #include <QObject>
 #include "../Parser/ISerializable.hpp"
-#include "../Video/Video.hpp"
+#include "../Channel/Channel.hpp"
+#include <unordered_map>
 
 class History : public QObject, ISerializable
 {
     SERIALIZABLE
     Q_OBJECT
 
-    Q_PROPERTY(QList<Video *> videos READ videos NOTIFY videosChanged)
+    Q_PROPERTY(QList<Channel *> channels READ channels NOTIFY channelsChanged)
+    Q_PROPERTY(QList<Channel *> channels READ channels NOTIFY channelsChanged)
 public:
     explicit History(QObject *parent = nullptr) : QObject(parent) {}
+
+    const std::vector<std::shared_ptr<Video>> getVideosSPtr()
+    {
+        return this->_videos;
+    }
 public slots:
+    QList<Channel *> channels();
     QList<Video *> videos();
 
 signals:
 
-    void videosChanged();
+    void channelsChanged();
 
 private:
-    std::vector<std::unique_ptr<Video>> _videos;
+    std::unordered_map<QString, std::unique_ptr<Channel>> _channels;
+    std::vector<std::shared_ptr<Video>> _videos;
 };

@@ -29,7 +29,7 @@ void FileLoader::openFileDialog()
                 this->setCurrentFile(fileName);
                 JsonSerializerVisitor serializer(fileContent);
                 auto history = serializer.visitHistory();
-                auto videos = history->videos();
+                auto videos = history->getVideosSPtr();
                 for (auto it = videos.begin(); it != videos.end(); ++it)
                 {
                     qDebug() << "Video title :" << (*it)->title();

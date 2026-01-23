@@ -28,15 +28,17 @@ JsonSerializerVisitor::JsonSerializerVisitor(const QJsonObject &object)
     this->_object = object;
 }
 
-std::unique_ptr<Video> JsonSerializerVisitor::visitVideo()
+std::shared_ptr<Video> JsonSerializerVisitor::visitVideo()
 {
-    QString title = this->getValueFromObjectOrThrows("title");
-    return std::make_unique<Video>(nullptr, title);
+    return std::make_shared<Video>(nullptr,
+                                   this->getValueFromObjectOrThrows<QString>("title"),
+                                   this->getValueFromObjectOrThrows<QString>("titleUrl"),
+                                   this->getValueFromObjectOrThrows<QString>("time"));
 }
 
 std::unique_ptr<History> JsonSerializerVisitor::visitHistory()
 {
-    if (!this->_array.has_value())
+    if (!this->_array.has_value() || this->_object.has_value())
     {
         throw JsonParsingError("Invalid json type, expecting array");
     }
@@ -47,24 +49,31 @@ std::unique_ptr<History> JsonSerializerVisitor::visitHistory()
         {
             throw JsonParsingError("Invalid or malformed json, expected array of objects");
         }
-        JsonSerializerVisitor tmpVisitor(it->toObject());
-        history->_videos.push_back(tmpVisitor.visitVideo());
+        auto vidJsonValue = it->toObject();
+        JsonSerializerVisitor tmpVisitor(vidJsonValue);
+        auto video = tmpVisitor.visitVideo();
+        history->_videos.push_back(video);
+        // handle channels
+        // handle of video made by multiple channels soon
+        JsonSerializerVisitor channelVisitor(tmpVisitor.getValueFromObjectOrThrows<QJsonArray>("subtitles").at(0).toObject());
+        auto channel = channelVisitor.visitChannel();
+        auto findedChannel = history->_channels.find(channel->url());
+        if (findedChannel == history->_channels.end())
+        {
+            channel->_videos.push_back(video);
+            history->_channels.insert({channel->url(), std::move(channel)});
+        }
+        else
+        {
+            findedChannel->second->_videos.push_back(video);
+        }
     }
     return std::move(history);
 }
 
-QString JsonSerializerVisitor::getValueFromObjectOrThrows(const QString &key)
+std::unique_ptr<Channel> JsonSerializerVisitor::visitChannel()
 {
-    if (!this->_object.has_value())
-    {
-        qDebug() << "No value";
-        throw JsonParsingError("Invalid json type, expecting object");
-    }
-    auto value = this->_object->value(key);
-    if (value.type() != QJsonValue::String)
-    {
-        qDebug() << "Not valid value";
-        throw JsonParsingError("Invalid json key at :" + key.toStdString());
-    }
-    return value.toString();
+    QString channelName = this->getValueFromObjectOrThrows<QString>("name");
+    QString url = this->getValueFromObjectOrThrows<QString>("url");
+    return std::make_unique<Channel>(nullptr, channelName, url);
 }

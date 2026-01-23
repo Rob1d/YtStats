@@ -65,7 +65,7 @@ Module["ready"] = new Promise((resolve, reject) => {
  readyPromiseReject = reject;
 });
 
-[ "__emscripten_thread_init", "__emscripten_thread_exit", "__emscripten_thread_crashed", "__emscripten_thread_mailbox_await", "__emscripten_tls_init", "_pthread_self", "checkMailbox", "__embind_initialize_bindings", "establishStackSpace", "invokeEntryPoint", "PThread", "___indirect_function_table", "_jsHaveAsyncify", "_jsHaveJspi", "___asyncjs__qt_jspi_suspend_js", "_qt_jspi_resume_js", "_qt_jspi_can_resume_js", "_init_jspi_support_js", "_qt_asyncify_suspend_js", "_qt_asyncify_resume_js", "_main", "onRuntimeInitialized" ].forEach(prop => {
+[ "__emscripten_thread_init", "__emscripten_thread_exit", "__emscripten_thread_crashed", "__emscripten_thread_mailbox_await", "__emscripten_tls_init", "_pthread_self", "checkMailbox", "__embind_initialize_bindings", "establishStackSpace", "invokeEntryPoint", "PThread", "getExceptionMessage", "$incrementExceptionRefcount", "$decrementExceptionRefcount", "___indirect_function_table", "_jsHaveAsyncify", "_jsHaveJspi", "___asyncjs__qt_jspi_suspend_js", "_qt_jspi_resume_js", "_qt_jspi_can_resume_js", "_init_jspi_support_js", "_qt_asyncify_suspend_js", "_qt_asyncify_resume_js", "_main", "onRuntimeInitialized" ].forEach(prop => {
  if (!Object.getOwnPropertyDescriptor(Module["ready"], prop)) {
   Object.defineProperty(Module["ready"], prop, {
    get: () => abort("You are getting " + prop + " on the Promise object, instead of the instance. Use .then() to get called back with the instance, see the MODULARIZE docs in src/settings.js"),
@@ -625,6 +625,20 @@ function createExportWrapper(name) {
   assert(f, `exported native function \`${name}\` not found`);
   return f(...args);
  };
+}
+
+class EmscriptenEH extends Error {}
+
+class EmscriptenSjLj extends EmscriptenEH {}
+
+class CppException extends EmscriptenEH {
+ constructor(excPtr) {
+  super(excPtr);
+  this.excPtr = excPtr;
+  const excInfo = getExceptionMessage(excPtr);
+  this.name = excInfo[0];
+  this.message = excInfo[1];
+ }
 }
 
 var wasmBinaryFile;
@@ -1187,6 +1201,8 @@ var callRuntimeCallbacks = callbacks => {
  }
 };
 
+var decrementExceptionRefcount = ptr => ___cxa_decrement_exception_refcount(ptr);
+
 var establishStackSpace = () => {
  var pthread_ptr = _pthread_self();
  var stackHigh = GROWABLE_HEAP_U32()[(((pthread_ptr) + (52)) >>> 2) >>> 0];
@@ -1206,6 +1222,93 @@ function exitOnMainThread(returnCode) {
  if (ENVIRONMENT_IS_PTHREAD) return proxyToMainThread(1, 0, 0, returnCode);
  _exit(returnCode);
 }
+
+var UTF8Decoder = typeof TextDecoder != "undefined" ? new TextDecoder("utf8") : undefined;
+
+/**
+     * Given a pointer 'idx' to a null-terminated UTF8-encoded string in the given
+     * array that contains uint8 values, returns a copy of that string as a
+     * Javascript String object.
+     * heapOrArray is either a regular array, or a JavaScript typed array view.
+     * @param {number} idx
+     * @param {number=} maxBytesToRead
+     * @return {string}
+     */ var UTF8ArrayToString = (heapOrArray, idx, maxBytesToRead) => {
+ idx >>>= 0;
+ var endIdx = idx + maxBytesToRead;
+ var endPtr = idx;
+ while (heapOrArray[endPtr] && !(endPtr >= endIdx)) ++endPtr;
+ if (endPtr - idx > 16 && heapOrArray.buffer && UTF8Decoder) {
+  return UTF8Decoder.decode(heapOrArray.buffer instanceof SharedArrayBuffer ? heapOrArray.slice(idx, endPtr) : heapOrArray.subarray(idx, endPtr));
+ }
+ var str = "";
+ while (idx < endPtr) {
+  var u0 = heapOrArray[idx++];
+  if (!(u0 & 128)) {
+   str += String.fromCharCode(u0);
+   continue;
+  }
+  var u1 = heapOrArray[idx++] & 63;
+  if ((u0 & 224) == 192) {
+   str += String.fromCharCode(((u0 & 31) << 6) | u1);
+   continue;
+  }
+  var u2 = heapOrArray[idx++] & 63;
+  if ((u0 & 240) == 224) {
+   u0 = ((u0 & 15) << 12) | (u1 << 6) | u2;
+  } else {
+   if ((u0 & 248) != 240) warnOnce("Invalid UTF-8 leading byte " + ptrToString(u0) + " encountered when deserializing a UTF-8 string in wasm memory to a JS string!");
+   u0 = ((u0 & 7) << 18) | (u1 << 12) | (u2 << 6) | (heapOrArray[idx++] & 63);
+  }
+  if (u0 < 65536) {
+   str += String.fromCharCode(u0);
+  } else {
+   var ch = u0 - 65536;
+   str += String.fromCharCode(55296 | (ch >> 10), 56320 | (ch & 1023));
+  }
+ }
+ return str;
+};
+
+/**
+     * Given a pointer 'ptr' to a null-terminated UTF8-encoded string in the
+     * emscripten HEAP, returns a copy of that string as a Javascript String object.
+     *
+     * @param {number} ptr
+     * @param {number=} maxBytesToRead - An optional length that specifies the
+     *   maximum number of bytes to read. You can omit this parameter to scan the
+     *   string until the first 0 byte. If maxBytesToRead is passed, and the string
+     *   at [ptr, ptr+maxBytesToReadr[ contains a null byte in the middle, then the
+     *   string will cut short at that byte index (i.e. maxBytesToRead will not
+     *   produce a string of exact length [ptr, ptr+maxBytesToRead[) N.B. mixing
+     *   frequent uses of UTF8ToString() with and without maxBytesToRead may throw
+     *   JS JIT optimizations off, so it is worth to consider consistently using one
+     * @return {string}
+     */ var UTF8ToString = (ptr, maxBytesToRead) => {
+ assert(typeof ptr == "number", `UTF8ToString expects a number (got ${typeof ptr})`);
+ ptr >>>= 0;
+ return ptr ? UTF8ArrayToString(GROWABLE_HEAP_U8(), ptr, maxBytesToRead) : "";
+};
+
+var getExceptionMessageCommon = ptr => withStackSave(() => {
+ var type_addr_addr = stackAlloc(4);
+ var message_addr_addr = stackAlloc(4);
+ ___get_exception_message(ptr, type_addr_addr, message_addr_addr);
+ var type_addr = GROWABLE_HEAP_U32()[((type_addr_addr) >>> 2) >>> 0];
+ var message_addr = GROWABLE_HEAP_U32()[((message_addr_addr) >>> 2) >>> 0];
+ var type = UTF8ToString(type_addr);
+ _free(type_addr);
+ var message;
+ if (message_addr) {
+  message = UTF8ToString(message_addr);
+  _free(message_addr);
+ }
+ return [ type, message ];
+});
+
+var getExceptionMessage = ptr => getExceptionMessageCommon(ptr);
+
+Module["getExceptionMessage"] = getExceptionMessage;
 
 /**
      * @param {number} ptr
@@ -1241,6 +1344,8 @@ function exitOnMainThread(returnCode) {
   abort(`invalid type for getValue: ${type}`);
  }
 }
+
+var incrementExceptionRefcount = ptr => ___cxa_increment_exception_refcount(ptr);
 
 var wasmTableMirror = [];
 
@@ -1326,73 +1431,6 @@ var warnOnce = text => {
   if (ENVIRONMENT_IS_NODE) text = "warning: " + text;
   err(text);
  }
-};
-
-var UTF8Decoder = typeof TextDecoder != "undefined" ? new TextDecoder("utf8") : undefined;
-
-/**
-     * Given a pointer 'idx' to a null-terminated UTF8-encoded string in the given
-     * array that contains uint8 values, returns a copy of that string as a
-     * Javascript String object.
-     * heapOrArray is either a regular array, or a JavaScript typed array view.
-     * @param {number} idx
-     * @param {number=} maxBytesToRead
-     * @return {string}
-     */ var UTF8ArrayToString = (heapOrArray, idx, maxBytesToRead) => {
- idx >>>= 0;
- var endIdx = idx + maxBytesToRead;
- var endPtr = idx;
- while (heapOrArray[endPtr] && !(endPtr >= endIdx)) ++endPtr;
- if (endPtr - idx > 16 && heapOrArray.buffer && UTF8Decoder) {
-  return UTF8Decoder.decode(heapOrArray.buffer instanceof SharedArrayBuffer ? heapOrArray.slice(idx, endPtr) : heapOrArray.subarray(idx, endPtr));
- }
- var str = "";
- while (idx < endPtr) {
-  var u0 = heapOrArray[idx++];
-  if (!(u0 & 128)) {
-   str += String.fromCharCode(u0);
-   continue;
-  }
-  var u1 = heapOrArray[idx++] & 63;
-  if ((u0 & 224) == 192) {
-   str += String.fromCharCode(((u0 & 31) << 6) | u1);
-   continue;
-  }
-  var u2 = heapOrArray[idx++] & 63;
-  if ((u0 & 240) == 224) {
-   u0 = ((u0 & 15) << 12) | (u1 << 6) | u2;
-  } else {
-   if ((u0 & 248) != 240) warnOnce("Invalid UTF-8 leading byte " + ptrToString(u0) + " encountered when deserializing a UTF-8 string in wasm memory to a JS string!");
-   u0 = ((u0 & 7) << 18) | (u1 << 12) | (u2 << 6) | (heapOrArray[idx++] & 63);
-  }
-  if (u0 < 65536) {
-   str += String.fromCharCode(u0);
-  } else {
-   var ch = u0 - 65536;
-   str += String.fromCharCode(55296 | (ch >> 10), 56320 | (ch & 1023));
-  }
- }
- return str;
-};
-
-/**
-     * Given a pointer 'ptr' to a null-terminated UTF8-encoded string in the
-     * emscripten HEAP, returns a copy of that string as a Javascript String object.
-     *
-     * @param {number} ptr
-     * @param {number=} maxBytesToRead - An optional length that specifies the
-     *   maximum number of bytes to read. You can omit this parameter to scan the
-     *   string until the first 0 byte. If maxBytesToRead is passed, and the string
-     *   at [ptr, ptr+maxBytesToReadr[ contains a null byte in the middle, then the
-     *   string will cut short at that byte index (i.e. maxBytesToRead will not
-     *   produce a string of exact length [ptr, ptr+maxBytesToRead[) N.B. mixing
-     *   frequent uses of UTF8ToString() with and without maxBytesToRead may throw
-     *   JS JIT optimizations off, so it is worth to consider consistently using one
-     * @return {string}
-     */ var UTF8ToString = (ptr, maxBytesToRead) => {
- assert(typeof ptr == "number", `UTF8ToString expects a number (got ${typeof ptr})`);
- ptr >>>= 0;
- return ptr ? UTF8ArrayToString(GROWABLE_HEAP_U8(), ptr, maxBytesToRead) : "";
 };
 
 function ___assert_fail(condition, filename, line, func) {
@@ -1490,13 +1528,13 @@ class ExceptionInfo {
 function ___resumeException(ptr) {
  ptr >>>= 0;
  if (!exceptionLast) {
-  exceptionLast = ptr;
+  exceptionLast = new CppException(ptr);
  }
- assert(false, "Exception thrown, but exception catching is not enabled. Compile with -sNO_DISABLE_EXCEPTION_CATCHING or -sEXCEPTION_CATCHING_ALLOWED=[..] to catch.");
+ throw exceptionLast;
 }
 
 var findMatchingCatch = args => {
- var thrown = exceptionLast;
+ var thrown = exceptionLast?.excPtr;
  if (!thrown) {
   setTempRet0(0);
   return 0;
@@ -1544,8 +1582,8 @@ var ___cxa_rethrow = () => {
   info.set_caught(false);
   uncaughtExceptionCount++;
  }
- exceptionLast = ptr;
- assert(false, "Exception thrown, but exception catching is not enabled. Compile with -sNO_DISABLE_EXCEPTION_CATCHING or -sEXCEPTION_CATCHING_ALLOWED=[..] to catch.");
+ exceptionLast = new CppException(ptr);
+ throw exceptionLast;
 };
 
 function ___cxa_throw(ptr, type, destructor) {
@@ -1554,10 +1592,12 @@ function ___cxa_throw(ptr, type, destructor) {
  destructor >>>= 0;
  var info = new ExceptionInfo(ptr);
  info.init(type, destructor);
- exceptionLast = ptr;
+ exceptionLast = new CppException(ptr);
  uncaughtExceptionCount++;
- assert(false, "Exception thrown, but exception catching is not enabled. Compile with -sNO_DISABLE_EXCEPTION_CATCHING or -sEXCEPTION_CATCHING_ALLOWED=[..] to catch.");
+ throw exceptionLast;
 }
+
+var ___cxa_uncaught_exceptions = () => uncaughtExceptionCount;
 
 function ___emscripten_init_main_thread_js(tb) {
  tb >>>= 0;
@@ -7318,7 +7358,7 @@ function __emscripten_thread_set_strongref(thread) {
 }
 
 var __emscripten_throw_longjmp = () => {
- throw Infinity;
+ throw new EmscriptenSjLj;
 };
 
 var requireRegisteredType = (rawType, humanName) => {
@@ -13452,6 +13492,7 @@ var wasmImports = {
  /** @export */ __cxa_find_matching_catch_3: ___cxa_find_matching_catch_3,
  /** @export */ __cxa_rethrow: ___cxa_rethrow,
  /** @export */ __cxa_throw: ___cxa_throw,
+ /** @export */ __cxa_uncaught_exceptions: ___cxa_uncaught_exceptions,
  /** @export */ __emscripten_init_main_thread_js: ___emscripten_init_main_thread_js,
  /** @export */ __emscripten_thread_cleanup: ___emscripten_thread_cleanup,
  /** @export */ __pthread_create_js: ___pthread_create_js,
@@ -13865,6 +13906,7 @@ var wasmImports = {
  /** @export */ invoke_diiii: invoke_diiii,
  /** @export */ invoke_diiiii: invoke_diiiii,
  /** @export */ invoke_fi: invoke_fi,
+ /** @export */ invoke_fiii: invoke_fiii,
  /** @export */ invoke_i: invoke_i,
  /** @export */ invoke_ii: invoke_ii,
  /** @export */ invoke_iid: invoke_iid,
@@ -13880,6 +13922,8 @@ var wasmImports = {
  /** @export */ invoke_iiiiiiiii: invoke_iiiiiiiii,
  /** @export */ invoke_iiiiiiiiii: invoke_iiiiiiiiii,
  /** @export */ invoke_iiiiiiiiiii: invoke_iiiiiiiiiii,
+ /** @export */ invoke_iiiiiiiiiiii: invoke_iiiiiiiiiiii,
+ /** @export */ invoke_iiiiiiiiiiiii: invoke_iiiiiiiiiiiii,
  /** @export */ invoke_iiiiiij: invoke_iiiiiij,
  /** @export */ invoke_iiij: invoke_iiij,
  /** @export */ invoke_iij: invoke_iij,
@@ -13889,9 +13933,11 @@ var wasmImports = {
  /** @export */ invoke_iijji: invoke_iijji,
  /** @export */ invoke_ij: invoke_ij,
  /** @export */ invoke_iji: invoke_iji,
+ /** @export */ invoke_j: invoke_j,
  /** @export */ invoke_ji: invoke_ji,
  /** @export */ invoke_jii: invoke_jii,
  /** @export */ invoke_jiii: invoke_jiii,
+ /** @export */ invoke_jiiii: invoke_jiiii,
  /** @export */ invoke_jiiiii: invoke_jiiiii,
  /** @export */ invoke_jiiiiiiii: invoke_jiiiiiiii,
  /** @export */ invoke_jiij: invoke_jiij,
@@ -13915,6 +13961,7 @@ var wasmImports = {
  /** @export */ invoke_viiiiiiii: invoke_viiiiiiii,
  /** @export */ invoke_viiiiiiiii: invoke_viiiiiiiii,
  /** @export */ invoke_viiiiiiiiii: invoke_viiiiiiiiii,
+ /** @export */ invoke_viiiiiiiiiiiiiii: invoke_viiiiiiiiiiiiiii,
  /** @export */ invoke_viiiijii: invoke_viiiijii,
  /** @export */ invoke_viij: invoke_viij,
  /** @export */ invoke_viiji: invoke_viiji,
@@ -13945,9 +13992,11 @@ var wasmExports = createWasm();
 
 var ___wasm_call_ctors = createExportWrapper("__wasm_call_ctors");
 
+var _free = createExportWrapper("free");
+
 var _main = Module["_main"] = createExportWrapper("__main_argc_argv");
 
-var _free = createExportWrapper("free");
+var ___cxa_free_exception = createExportWrapper("__cxa_free_exception");
 
 var _fflush = createExportWrapper("fflush");
 
@@ -14013,24 +14062,15 @@ var ___cxa_decrement_exception_refcount = createExportWrapper("__cxa_decrement_e
 
 var ___cxa_increment_exception_refcount = createExportWrapper("__cxa_increment_exception_refcount");
 
+var ___get_exception_message = createExportWrapper("__get_exception_message");
+
 var ___cxa_can_catch = createExportWrapper("__cxa_can_catch");
 
 var ___cxa_is_pointer_type = createExportWrapper("__cxa_is_pointer_type");
 
-var ___start_em_js = Module["___start_em_js"] = 12257448;
+var ___start_em_js = Module["___start_em_js"] = 13484820;
 
-var ___stop_em_js = Module["___stop_em_js"] = 12258538;
-
-function invoke_viiii(index, a1, a2, a3, a4) {
- var sp = stackSave();
- try {
-  getWasmTableEntry(index)(a1, a2, a3, a4);
- } catch (e) {
-  stackRestore(sp);
-  if (e !== e + 0) throw e;
-  _setThrew(1, 0);
- }
-}
+var ___stop_em_js = Module["___stop_em_js"] = 13485910;
 
 function invoke_viii(index, a1, a2, a3) {
  var sp = stackSave();
@@ -14038,73 +14078,18 @@ function invoke_viii(index, a1, a2, a3) {
   getWasmTableEntry(index)(a1, a2, a3);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
 
-function invoke_ii(index, a1) {
+function invoke_viiii(index, a1, a2, a3, a4) {
  var sp = stackSave();
  try {
-  return getWasmTableEntry(index)(a1);
+  getWasmTableEntry(index)(a1, a2, a3, a4);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
-  _setThrew(1, 0);
- }
-}
-
-function invoke_v(index) {
- var sp = stackSave();
- try {
-  getWasmTableEntry(index)();
- } catch (e) {
-  stackRestore(sp);
-  if (e !== e + 0) throw e;
-  _setThrew(1, 0);
- }
-}
-
-function invoke_iiii(index, a1, a2, a3) {
- var sp = stackSave();
- try {
-  return getWasmTableEntry(index)(a1, a2, a3);
- } catch (e) {
-  stackRestore(sp);
-  if (e !== e + 0) throw e;
-  _setThrew(1, 0);
- }
-}
-
-function invoke_i(index) {
- var sp = stackSave();
- try {
-  return getWasmTableEntry(index)();
- } catch (e) {
-  stackRestore(sp);
-  if (e !== e + 0) throw e;
-  _setThrew(1, 0);
- }
-}
-
-function invoke_vii(index, a1, a2) {
- var sp = stackSave();
- try {
-  getWasmTableEntry(index)(a1, a2);
- } catch (e) {
-  stackRestore(sp);
-  if (e !== e + 0) throw e;
-  _setThrew(1, 0);
- }
-}
-
-function invoke_vi(index, a1) {
- var sp = stackSave();
- try {
-  getWasmTableEntry(index)(a1);
- } catch (e) {
-  stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14115,30 +14100,84 @@ function invoke_iii(index, a1, a2) {
   return getWasmTableEntry(index)(a1, a2);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
 
-function invoke_jiiiii(index, a1, a2, a3, a4, a5) {
+function invoke_vii(index, a1, a2) {
+ var sp = stackSave();
+ try {
+  getWasmTableEntry(index)(a1, a2);
+ } catch (e) {
+  stackRestore(sp);
+  if (!(e instanceof EmscriptenEH)) throw e;
+  _setThrew(1, 0);
+ }
+}
+
+function invoke_iiii(index, a1, a2, a3) {
+ var sp = stackSave();
+ try {
+  return getWasmTableEntry(index)(a1, a2, a3);
+ } catch (e) {
+  stackRestore(sp);
+  if (!(e instanceof EmscriptenEH)) throw e;
+  _setThrew(1, 0);
+ }
+}
+
+function invoke_ii(index, a1) {
+ var sp = stackSave();
+ try {
+  return getWasmTableEntry(index)(a1);
+ } catch (e) {
+  stackRestore(sp);
+  if (!(e instanceof EmscriptenEH)) throw e;
+  _setThrew(1, 0);
+ }
+}
+
+function invoke_vi(index, a1) {
+ var sp = stackSave();
+ try {
+  getWasmTableEntry(index)(a1);
+ } catch (e) {
+  stackRestore(sp);
+  if (!(e instanceof EmscriptenEH)) throw e;
+  _setThrew(1, 0);
+ }
+}
+
+function invoke_v(index) {
+ var sp = stackSave();
+ try {
+  getWasmTableEntry(index)();
+ } catch (e) {
+  stackRestore(sp);
+  if (!(e instanceof EmscriptenEH)) throw e;
+  _setThrew(1, 0);
+ }
+}
+
+function invoke_iiiii(index, a1, a2, a3, a4) {
+ var sp = stackSave();
+ try {
+  return getWasmTableEntry(index)(a1, a2, a3, a4);
+ } catch (e) {
+  stackRestore(sp);
+  if (!(e instanceof EmscriptenEH)) throw e;
+  _setThrew(1, 0);
+ }
+}
+
+function invoke_iiiiii(index, a1, a2, a3, a4, a5) {
  var sp = stackSave();
  try {
   return getWasmTableEntry(index)(a1, a2, a3, a4, a5);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
-  _setThrew(1, 0);
-  return 0n;
- }
-}
-
-function invoke_viiiii(index, a1, a2, a3, a4, a5) {
- var sp = stackSave();
- try {
-  getWasmTableEntry(index)(a1, a2, a3, a4, a5);
- } catch (e) {
-  stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14149,8 +14188,54 @@ function invoke_viiiiii(index, a1, a2, a3, a4, a5, a6) {
   getWasmTableEntry(index)(a1, a2, a3, a4, a5, a6);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
+ }
+}
+
+function invoke_i(index) {
+ var sp = stackSave();
+ try {
+  return getWasmTableEntry(index)();
+ } catch (e) {
+  stackRestore(sp);
+  if (!(e instanceof EmscriptenEH)) throw e;
+  _setThrew(1, 0);
+ }
+}
+
+function invoke_viiiii(index, a1, a2, a3, a4, a5) {
+ var sp = stackSave();
+ try {
+  getWasmTableEntry(index)(a1, a2, a3, a4, a5);
+ } catch (e) {
+  stackRestore(sp);
+  if (!(e instanceof EmscriptenEH)) throw e;
+  _setThrew(1, 0);
+ }
+}
+
+function invoke_jiiii(index, a1, a2, a3, a4) {
+ var sp = stackSave();
+ try {
+  return getWasmTableEntry(index)(a1, a2, a3, a4);
+ } catch (e) {
+  stackRestore(sp);
+  if (!(e instanceof EmscriptenEH)) throw e;
+  _setThrew(1, 0);
+  return 0n;
+ }
+}
+
+function invoke_jiiiii(index, a1, a2, a3, a4, a5) {
+ var sp = stackSave();
+ try {
+  return getWasmTableEntry(index)(a1, a2, a3, a4, a5);
+ } catch (e) {
+  stackRestore(sp);
+  if (!(e instanceof EmscriptenEH)) throw e;
+  _setThrew(1, 0);
+  return 0n;
  }
 }
 
@@ -14160,7 +14245,7 @@ function invoke_jj(index, a1) {
   return getWasmTableEntry(index)(a1);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
   return 0n;
  }
@@ -14172,18 +14257,7 @@ function invoke_vjiii(index, a1, a2, a3, a4) {
   getWasmTableEntry(index)(a1, a2, a3, a4);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
-  _setThrew(1, 0);
- }
-}
-
-function invoke_iiiii(index, a1, a2, a3, a4) {
- var sp = stackSave();
- try {
-  return getWasmTableEntry(index)(a1, a2, a3, a4);
- } catch (e) {
-  stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14194,7 +14268,7 @@ function invoke_viji(index, a1, a2, a3) {
   getWasmTableEntry(index)(a1, a2, a3);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14205,7 +14279,7 @@ function invoke_viijii(index, a1, a2, a3, a4, a5) {
   getWasmTableEntry(index)(a1, a2, a3, a4, a5);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14216,7 +14290,7 @@ function invoke_jiii(index, a1, a2, a3) {
   return getWasmTableEntry(index)(a1, a2, a3);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
   return 0n;
  }
@@ -14228,7 +14302,7 @@ function invoke_iij(index, a1, a2) {
   return getWasmTableEntry(index)(a1, a2);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14239,20 +14313,9 @@ function invoke_jii(index, a1, a2) {
   return getWasmTableEntry(index)(a1, a2);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
   return 0n;
- }
-}
-
-function invoke_iiiiii(index, a1, a2, a3, a4, a5) {
- var sp = stackSave();
- try {
-  return getWasmTableEntry(index)(a1, a2, a3, a4, a5);
- } catch (e) {
-  stackRestore(sp);
-  if (e !== e + 0) throw e;
-  _setThrew(1, 0);
  }
 }
 
@@ -14262,7 +14325,7 @@ function invoke_jiij(index, a1, a2, a3) {
   return getWasmTableEntry(index)(a1, a2, a3);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
   return 0n;
  }
@@ -14274,7 +14337,7 @@ function invoke_ji(index, a1) {
   return getWasmTableEntry(index)(a1);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
   return 0n;
  }
@@ -14286,7 +14349,7 @@ function invoke_jiiji(index, a1, a2, a3, a4) {
   return getWasmTableEntry(index)(a1, a2, a3, a4);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
   return 0n;
  }
@@ -14298,7 +14361,7 @@ function invoke_iiij(index, a1, a2, a3) {
   return getWasmTableEntry(index)(a1, a2, a3);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14309,7 +14372,7 @@ function invoke_iiiiiij(index, a1, a2, a3, a4, a5, a6) {
   return getWasmTableEntry(index)(a1, a2, a3, a4, a5, a6);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14320,7 +14383,7 @@ function invoke_vijii(index, a1, a2, a3, a4) {
   getWasmTableEntry(index)(a1, a2, a3, a4);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14331,7 +14394,7 @@ function invoke_diii(index, a1, a2, a3) {
   return getWasmTableEntry(index)(a1, a2, a3);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14342,7 +14405,7 @@ function invoke_viijiii(index, a1, a2, a3, a4, a5, a6) {
   getWasmTableEntry(index)(a1, a2, a3, a4, a5, a6);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14353,7 +14416,7 @@ function invoke_iiiiiiii(index, a1, a2, a3, a4, a5, a6, a7) {
   return getWasmTableEntry(index)(a1, a2, a3, a4, a5, a6, a7);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14364,7 +14427,7 @@ function invoke_iiiiiiiii(index, a1, a2, a3, a4, a5, a6, a7, a8) {
   return getWasmTableEntry(index)(a1, a2, a3, a4, a5, a6, a7, a8);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14375,7 +14438,7 @@ function invoke_iiiiiii(index, a1, a2, a3, a4, a5, a6) {
   return getWasmTableEntry(index)(a1, a2, a3, a4, a5, a6);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14386,7 +14449,7 @@ function invoke_viij(index, a1, a2, a3) {
   getWasmTableEntry(index)(a1, a2, a3);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14397,7 +14460,7 @@ function invoke_viiiiiiiii(index, a1, a2, a3, a4, a5, a6, a7, a8, a9) {
   getWasmTableEntry(index)(a1, a2, a3, a4, a5, a6, a7, a8, a9);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14408,7 +14471,7 @@ function invoke_iijiii(index, a1, a2, a3, a4, a5) {
   return getWasmTableEntry(index)(a1, a2, a3, a4, a5);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14419,7 +14482,7 @@ function invoke_vij(index, a1, a2) {
   getWasmTableEntry(index)(a1, a2);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14430,7 +14493,7 @@ function invoke_iiji(index, a1, a2, a3) {
   return getWasmTableEntry(index)(a1, a2, a3);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14441,7 +14504,7 @@ function invoke_iid(index, a1, a2) {
   return getWasmTableEntry(index)(a1, a2);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14452,7 +14515,7 @@ function invoke_vidii(index, a1, a2, a3, a4) {
   getWasmTableEntry(index)(a1, a2, a3, a4);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14463,7 +14526,7 @@ function invoke_dii(index, a1, a2) {
   return getWasmTableEntry(index)(a1, a2);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14474,7 +14537,7 @@ function invoke_viijiiii(index, a1, a2, a3, a4, a5, a6, a7) {
   getWasmTableEntry(index)(a1, a2, a3, a4, a5, a6, a7);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14485,7 +14548,7 @@ function invoke_viiiiiiiiii(index, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10) {
   getWasmTableEntry(index)(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14496,7 +14559,7 @@ function invoke_viiiiiiii(index, a1, a2, a3, a4, a5, a6, a7, a8) {
   getWasmTableEntry(index)(a1, a2, a3, a4, a5, a6, a7, a8);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14507,7 +14570,7 @@ function invoke_viiiijii(index, a1, a2, a3, a4, a5, a6, a7) {
   getWasmTableEntry(index)(a1, a2, a3, a4, a5, a6, a7);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14518,7 +14581,7 @@ function invoke_vdiiiiiii(index, a1, a2, a3, a4, a5, a6, a7, a8) {
   getWasmTableEntry(index)(a1, a2, a3, a4, a5, a6, a7, a8);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14529,7 +14592,7 @@ function invoke_viidiiii(index, a1, a2, a3, a4, a5, a6, a7) {
   getWasmTableEntry(index)(a1, a2, a3, a4, a5, a6, a7);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14540,7 +14603,7 @@ function invoke_vijiii(index, a1, a2, a3, a4, a5) {
   getWasmTableEntry(index)(a1, a2, a3, a4, a5);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14551,7 +14614,7 @@ function invoke_viiji(index, a1, a2, a3, a4) {
   getWasmTableEntry(index)(a1, a2, a3, a4);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14562,7 +14625,7 @@ function invoke_ij(index, a1) {
   return getWasmTableEntry(index)(a1);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14573,7 +14636,7 @@ function invoke_iijii(index, a1, a2, a3, a4) {
   return getWasmTableEntry(index)(a1, a2, a3, a4);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14584,7 +14647,7 @@ function invoke_viiiiiii(index, a1, a2, a3, a4, a5, a6, a7) {
   getWasmTableEntry(index)(a1, a2, a3, a4, a5, a6, a7);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14595,7 +14658,7 @@ function invoke_jiiiiiiii(index, a1, a2, a3, a4, a5, a6, a7, a8) {
   return getWasmTableEntry(index)(a1, a2, a3, a4, a5, a6, a7, a8);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
   return 0n;
  }
@@ -14607,7 +14670,7 @@ function invoke_iji(index, a1, a2) {
   return getWasmTableEntry(index)(a1, a2);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14618,7 +14681,7 @@ function invoke_diiiii(index, a1, a2, a3, a4, a5) {
   return getWasmTableEntry(index)(a1, a2, a3, a4, a5);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14629,7 +14692,7 @@ function invoke_iijji(index, a1, a2, a3, a4) {
   return getWasmTableEntry(index)(a1, a2, a3, a4);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14640,7 +14703,7 @@ function invoke_diiii(index, a1, a2, a3, a4) {
   return getWasmTableEntry(index)(a1, a2, a3, a4);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14651,7 +14714,7 @@ function invoke_viijj(index, a1, a2, a3, a4) {
   getWasmTableEntry(index)(a1, a2, a3, a4);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14662,7 +14725,7 @@ function invoke_vijj(index, a1, a2, a3) {
   getWasmTableEntry(index)(a1, a2, a3);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14673,7 +14736,7 @@ function invoke_iidi(index, a1, a2, a3) {
   return getWasmTableEntry(index)(a1, a2, a3);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14684,7 +14747,7 @@ function invoke_vj(index, a1) {
   getWasmTableEntry(index)(a1);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14695,7 +14758,7 @@ function invoke_iiiiiiiiiii(index, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10) {
   return getWasmTableEntry(index)(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14706,7 +14769,7 @@ function invoke_iiiiiiif(index, a1, a2, a3, a4, a5, a6, a7) {
   return getWasmTableEntry(index)(a1, a2, a3, a4, a5, a6, a7);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14717,7 +14780,7 @@ function invoke_iiiif(index, a1, a2, a3, a4) {
   return getWasmTableEntry(index)(a1, a2, a3, a4);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14728,7 +14791,7 @@ function invoke_vidd(index, a1, a2, a3) {
   getWasmTableEntry(index)(a1, a2, a3);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14739,7 +14802,7 @@ function invoke_viif(index, a1, a2, a3) {
   getWasmTableEntry(index)(a1, a2, a3);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14750,7 +14813,7 @@ function invoke_iiiiiiiiii(index, a1, a2, a3, a4, a5, a6, a7, a8, a9) {
   return getWasmTableEntry(index)(a1, a2, a3, a4, a5, a6, a7, a8, a9);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14761,7 +14824,7 @@ function invoke_fi(index, a1) {
   return getWasmTableEntry(index)(a1);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14772,7 +14835,7 @@ function invoke_viiif(index, a1, a2, a3, a4) {
   getWasmTableEntry(index)(a1, a2, a3, a4);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14783,7 +14846,63 @@ function invoke_viid(index, a1, a2, a3) {
   getWasmTableEntry(index)(a1, a2, a3);
  } catch (e) {
   stackRestore(sp);
-  if (e !== e + 0) throw e;
+  if (!(e instanceof EmscriptenEH)) throw e;
+  _setThrew(1, 0);
+ }
+}
+
+function invoke_j(index) {
+ var sp = stackSave();
+ try {
+  return getWasmTableEntry(index)();
+ } catch (e) {
+  stackRestore(sp);
+  if (!(e instanceof EmscriptenEH)) throw e;
+  _setThrew(1, 0);
+  return 0n;
+ }
+}
+
+function invoke_iiiiiiiiiiiii(index, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12) {
+ var sp = stackSave();
+ try {
+  return getWasmTableEntry(index)(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12);
+ } catch (e) {
+  stackRestore(sp);
+  if (!(e instanceof EmscriptenEH)) throw e;
+  _setThrew(1, 0);
+ }
+}
+
+function invoke_fiii(index, a1, a2, a3) {
+ var sp = stackSave();
+ try {
+  return getWasmTableEntry(index)(a1, a2, a3);
+ } catch (e) {
+  stackRestore(sp);
+  if (!(e instanceof EmscriptenEH)) throw e;
+  _setThrew(1, 0);
+ }
+}
+
+function invoke_iiiiiiiiiiii(index, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11) {
+ var sp = stackSave();
+ try {
+  return getWasmTableEntry(index)(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11);
+ } catch (e) {
+  stackRestore(sp);
+  if (!(e instanceof EmscriptenEH)) throw e;
+  _setThrew(1, 0);
+ }
+}
+
+function invoke_viiiiiiiiiiiiiii(index, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15) {
+ var sp = stackSave();
+ try {
+  getWasmTableEntry(index)(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15);
+ } catch (e) {
+  stackRestore(sp);
+  if (!(e instanceof EmscriptenEH)) throw e;
   _setThrew(1, 0);
  }
 }
@@ -14830,7 +14949,7 @@ var missingLibrarySymbols = [ "writeI53ToI64Clamped", "writeI53ToI64Signaling", 
 
 missingLibrarySymbols.forEach(missingLibrarySymbol);
 
-var unexportedSymbols = [ "run", "addOnPreRun", "addOnInit", "addOnPreMain", "addOnExit", "addOnPostRun", "addRunDependency", "removeRunDependency", "FS_createFolder", "FS_createPath", "FS_createLazyFile", "FS_createLink", "FS_createDevice", "FS_readFile", "out", "err", "abort", "wasmExports", "stackAlloc", "stackSave", "stackRestore", "getTempRet0", "setTempRet0", "GROWABLE_HEAP_I8", "GROWABLE_HEAP_U8", "GROWABLE_HEAP_I16", "GROWABLE_HEAP_U16", "GROWABLE_HEAP_I32", "GROWABLE_HEAP_U32", "GROWABLE_HEAP_F32", "GROWABLE_HEAP_F64", "writeStackCookie", "checkStackCookie", "writeI53ToI64", "readI53FromI64", "readI53FromU64", "convertI32PairToI53", "convertU32PairToI53", "MAX_INT53", "MIN_INT53", "bigintToI53Checked", "ptrToString", "zeroMemory", "exitJS", "getHeapMax", "growMemory", "ENV", "MONTH_DAYS_REGULAR", "MONTH_DAYS_LEAP", "MONTH_DAYS_REGULAR_CUMULATIVE", "MONTH_DAYS_LEAP_CUMULATIVE", "isLeapYear", "ydayFromDate", "arraySum", "addDays", "ERRNO_CODES", "ERRNO_MESSAGES", "inetPton4", "inetNtop4", "inetPton6", "inetNtop6", "readSockaddr", "writeSockaddr", "DNS", "Protocols", "Sockets", "initRandomFill", "randomFill", "timers", "warnOnce", "getCallstack", "emscriptenLog", "UNWIND_CACHE", "readEmAsmArgsArray", "jstoi_q", "jstoi_s", "getExecutableName", "handleException", "runtimeKeepalivePush", "runtimeKeepalivePop", "callUserCallback", "maybeExit", "asyncLoad", "alignMemory", "mmapAlloc", "HandleAllocator", "wasmTable", "noExitRuntime", "freeTableIndexes", "functionsInTableMap", "reallyNegative", "unSign", "strLen", "reSign", "formatString", "setValue", "getValue", "PATH", "PATH_FS", "UTF8Decoder", "UTF8ArrayToString", "UTF8ToString", "stringToUTF8Array", "stringToUTF8", "lengthBytesUTF8", "intArrayFromString", "stringToAscii", "UTF16Decoder", "lengthBytesUTF16", "UTF32ToString", "stringToUTF32", "lengthBytesUTF32", "stringToNewUTF8", "stringToUTF8OnStack", "writeArrayToMemory", "maybeCStringToJsString", "findEventTarget", "findCanvasEventTarget", "getBoundingClientRect", "fillMouseEventData", "registerWheelEventCallback", "registerUiEventCallback", "currentFullscreenStrategy", "restoreOldWindowedStyle", "jsStackTrace", "getEnvStrings", "doReadv", "doWritev", "safeSetTimeout", "promiseMap", "uncaughtExceptionCount", "exceptionLast", "exceptionCaught", "ExceptionInfo", "findMatchingCatch", "Browser", "setMainLoop", "getPreloadedImageData__data", "wget", "SYSCALLS", "getSocketFromFD", "getSocketAddress", "preloadPlugins", "FS_createPreloadedFile", "FS_modeStringToFlags", "FS_getMode", "FS_stdin_getChar_buffer", "FS_stdin_getChar", "FS_createDataFile", "MEMFS", "TTY", "PIPEFS", "SOCKFS", "_setNetworkCallback", "tempFixedLengthArray", "miniTempWebGLFloatBuffers", "miniTempWebGLIntBuffers", "heapObjectForWebGLType", "toTypedArrayIndex", "webgl_enable_ANGLE_instanced_arrays", "webgl_enable_OES_vertex_array_object", "webgl_enable_WEBGL_draw_buffers", "webgl_enable_WEBGL_multi_draw", "GL", "emscriptenWebGLGet", "computeUnpackAlignedImageSize", "colorChannelsInGlTextureFormat", "emscriptenWebGLGetTexPixelData", "emscriptenWebGLGetUniform", "webglGetUniformLocation", "webglPrepareUniformLocationsBeforeFirstUse", "webglGetLeftBracePos", "emscriptenWebGLGetVertexAttrib", "__glGetActiveAttribOrUniform", "AL", "GLUT", "EGL", "GLEW", "IDBStore", "SDL", "SDL_gfx", "emscriptenWebGLGetIndexed", "webgl_enable_WEBGL_draw_instanced_base_vertex_base_instance", "webgl_enable_WEBGL_multi_draw_instanced_base_vertex_base_instance", "allocateUTF8", "allocateUTF8OnStack", "Fetch", "fetchDeleteCachedData", "fetchLoadCachedData", "fetchCacheData", "fetchXHR", "terminateWorker", "killThread", "cleanupThread", "registerTLSInit", "cancelThread", "spawnThread", "exitOnMainThread", "proxyToMainThread", "proxiedJSCallArgs", "invokeEntryPoint", "checkMailbox", "InternalError", "BindingError", "throwInternalError", "throwBindingError", "registeredTypes", "awaitingDependencies", "typeDependencies", "tupleRegistrations", "structRegistrations", "sharedRegisterType", "whenDependentTypesAreResolved", "embind_charCodes", "embind_init_charCodes", "readLatin1String", "getTypeName", "getFunctionName", "heap32VectorToArray", "requireRegisteredType", "usesDestructorStack", "createJsInvoker", "UnboundTypeError", "PureVirtualError", "GenericWireTypeSize", "EmValType", "init_embind", "throwUnboundTypeError", "ensureOverloadTable", "exposePublicSymbol", "replacePublicSymbol", "extendError", "createNamedFunction", "embindRepr", "registeredInstances", "getBasestPointer", "getInheritedInstance", "getInheritedInstanceCount", "getLiveInheritedInstances", "registeredPointers", "registerType", "integerReadValueFromPointer", "floatReadValueFromPointer", "readPointer", "runDestructors", "newFunc", "craftInvokerFunction", "embind__requireFunction", "genericPointerToWireType", "constNoSmartPtrRawPointerToWireType", "nonConstNoSmartPtrRawPointerToWireType", "init_RegisteredPointer", "RegisteredPointer", "RegisteredPointer_fromWireType", "runDestructor", "releaseClassHandle", "finalizationRegistry", "detachFinalizer_deps", "detachFinalizer", "attachFinalizer", "makeClassHandle", "init_ClassHandle", "ClassHandle", "throwInstanceAlreadyDeleted", "deletionQueue", "flushPendingDeletes", "delayFunction", "setDelayFunction", "RegisteredClass", "shallowCopyInternalPointer", "downcastPointer", "upcastPointer", "char_0", "char_9", "makeLegalFunctionName", "emval_freelist", "emval_handles", "emval_symbols", "init_emval", "count_emval_handles", "getStringOrSymbol", "Emval", "emval_get_global", "emval_returnValue", "emval_lookupTypes", "emval_methodCallers", "emval_addMethodCaller", "reflectConstruct" ];
+var unexportedSymbols = [ "run", "addOnPreRun", "addOnInit", "addOnPreMain", "addOnExit", "addOnPostRun", "addRunDependency", "removeRunDependency", "FS_createFolder", "FS_createPath", "FS_createLazyFile", "FS_createLink", "FS_createDevice", "FS_readFile", "out", "err", "abort", "wasmExports", "stackAlloc", "stackSave", "stackRestore", "getTempRet0", "setTempRet0", "GROWABLE_HEAP_I8", "GROWABLE_HEAP_U8", "GROWABLE_HEAP_I16", "GROWABLE_HEAP_U16", "GROWABLE_HEAP_I32", "GROWABLE_HEAP_U32", "GROWABLE_HEAP_F32", "GROWABLE_HEAP_F64", "writeStackCookie", "checkStackCookie", "writeI53ToI64", "readI53FromI64", "readI53FromU64", "convertI32PairToI53", "convertU32PairToI53", "MAX_INT53", "MIN_INT53", "bigintToI53Checked", "ptrToString", "zeroMemory", "exitJS", "getHeapMax", "growMemory", "ENV", "MONTH_DAYS_REGULAR", "MONTH_DAYS_LEAP", "MONTH_DAYS_REGULAR_CUMULATIVE", "MONTH_DAYS_LEAP_CUMULATIVE", "isLeapYear", "ydayFromDate", "arraySum", "addDays", "ERRNO_CODES", "ERRNO_MESSAGES", "inetPton4", "inetNtop4", "inetPton6", "inetNtop6", "readSockaddr", "writeSockaddr", "DNS", "Protocols", "Sockets", "initRandomFill", "randomFill", "timers", "warnOnce", "getCallstack", "emscriptenLog", "UNWIND_CACHE", "readEmAsmArgsArray", "jstoi_q", "jstoi_s", "getExecutableName", "handleException", "runtimeKeepalivePush", "runtimeKeepalivePop", "callUserCallback", "maybeExit", "asyncLoad", "alignMemory", "mmapAlloc", "HandleAllocator", "wasmTable", "noExitRuntime", "freeTableIndexes", "functionsInTableMap", "reallyNegative", "unSign", "strLen", "reSign", "formatString", "setValue", "getValue", "PATH", "PATH_FS", "UTF8Decoder", "UTF8ArrayToString", "UTF8ToString", "stringToUTF8Array", "stringToUTF8", "lengthBytesUTF8", "intArrayFromString", "stringToAscii", "UTF16Decoder", "lengthBytesUTF16", "UTF32ToString", "stringToUTF32", "lengthBytesUTF32", "stringToNewUTF8", "stringToUTF8OnStack", "writeArrayToMemory", "maybeCStringToJsString", "findEventTarget", "findCanvasEventTarget", "getBoundingClientRect", "fillMouseEventData", "registerWheelEventCallback", "registerUiEventCallback", "currentFullscreenStrategy", "restoreOldWindowedStyle", "jsStackTrace", "getEnvStrings", "doReadv", "doWritev", "safeSetTimeout", "promiseMap", "uncaughtExceptionCount", "exceptionLast", "exceptionCaught", "ExceptionInfo", "findMatchingCatch", "getExceptionMessageCommon", "incrementExceptionRefcount", "decrementExceptionRefcount", "getExceptionMessage", "Browser", "setMainLoop", "getPreloadedImageData__data", "wget", "SYSCALLS", "getSocketFromFD", "getSocketAddress", "preloadPlugins", "FS_createPreloadedFile", "FS_modeStringToFlags", "FS_getMode", "FS_stdin_getChar_buffer", "FS_stdin_getChar", "FS_createDataFile", "MEMFS", "TTY", "PIPEFS", "SOCKFS", "_setNetworkCallback", "tempFixedLengthArray", "miniTempWebGLFloatBuffers", "miniTempWebGLIntBuffers", "heapObjectForWebGLType", "toTypedArrayIndex", "webgl_enable_ANGLE_instanced_arrays", "webgl_enable_OES_vertex_array_object", "webgl_enable_WEBGL_draw_buffers", "webgl_enable_WEBGL_multi_draw", "GL", "emscriptenWebGLGet", "computeUnpackAlignedImageSize", "colorChannelsInGlTextureFormat", "emscriptenWebGLGetTexPixelData", "emscriptenWebGLGetUniform", "webglGetUniformLocation", "webglPrepareUniformLocationsBeforeFirstUse", "webglGetLeftBracePos", "emscriptenWebGLGetVertexAttrib", "__glGetActiveAttribOrUniform", "AL", "GLUT", "EGL", "GLEW", "IDBStore", "SDL", "SDL_gfx", "emscriptenWebGLGetIndexed", "webgl_enable_WEBGL_draw_instanced_base_vertex_base_instance", "webgl_enable_WEBGL_multi_draw_instanced_base_vertex_base_instance", "allocateUTF8", "allocateUTF8OnStack", "Fetch", "fetchDeleteCachedData", "fetchLoadCachedData", "fetchCacheData", "fetchXHR", "terminateWorker", "killThread", "cleanupThread", "registerTLSInit", "cancelThread", "spawnThread", "exitOnMainThread", "proxyToMainThread", "proxiedJSCallArgs", "invokeEntryPoint", "checkMailbox", "InternalError", "BindingError", "throwInternalError", "throwBindingError", "registeredTypes", "awaitingDependencies", "typeDependencies", "tupleRegistrations", "structRegistrations", "sharedRegisterType", "whenDependentTypesAreResolved", "embind_charCodes", "embind_init_charCodes", "readLatin1String", "getTypeName", "getFunctionName", "heap32VectorToArray", "requireRegisteredType", "usesDestructorStack", "createJsInvoker", "UnboundTypeError", "PureVirtualError", "GenericWireTypeSize", "EmValType", "init_embind", "throwUnboundTypeError", "ensureOverloadTable", "exposePublicSymbol", "replacePublicSymbol", "extendError", "createNamedFunction", "embindRepr", "registeredInstances", "getBasestPointer", "getInheritedInstance", "getInheritedInstanceCount", "getLiveInheritedInstances", "registeredPointers", "registerType", "integerReadValueFromPointer", "floatReadValueFromPointer", "readPointer", "runDestructors", "newFunc", "craftInvokerFunction", "embind__requireFunction", "genericPointerToWireType", "constNoSmartPtrRawPointerToWireType", "nonConstNoSmartPtrRawPointerToWireType", "init_RegisteredPointer", "RegisteredPointer", "RegisteredPointer_fromWireType", "runDestructor", "releaseClassHandle", "finalizationRegistry", "detachFinalizer_deps", "detachFinalizer", "attachFinalizer", "makeClassHandle", "init_ClassHandle", "ClassHandle", "throwInstanceAlreadyDeleted", "deletionQueue", "flushPendingDeletes", "delayFunction", "setDelayFunction", "RegisteredClass", "shallowCopyInternalPointer", "downcastPointer", "upcastPointer", "char_0", "char_9", "makeLegalFunctionName", "emval_freelist", "emval_handles", "emval_symbols", "init_emval", "count_emval_handles", "getStringOrSymbol", "Emval", "emval_get_global", "emval_returnValue", "emval_lookupTypes", "emval_methodCallers", "emval_addMethodCaller", "reflectConstruct" ];
 
 unexportedSymbols.forEach(unexportedRuntimeSymbol);
 

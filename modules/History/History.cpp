@@ -1,5 +1,15 @@
 #include "History.hpp"
 
+QList<Channel *> History::channels()
+{
+    QList<Channel *> channelsAsQ;
+    for (const auto &it : this->_channels)
+    {
+        channelsAsQ.push_back(it.second.get());
+    }
+    return channelsAsQ;
+}
+
 QList<Video *> History::videos()
 {
     QList<Video *> videosAsQ;
