@@ -14,9 +14,9 @@ void FileLoader::setCurrentFile(const QString &fileName)
     emit this->currentFileChanged();
 }
 
-void FileLoader::openFileDialog()
+void FileLoader::openFileDialog(History *history)
 {
-    auto fileContentReady = [this](const QString &fileName, const QByteArray &fileContent)
+    auto fileContentReady = [this, history](const QString &fileName, const QByteArray &fileContent)
     {
         if (fileName.isEmpty())
         {
@@ -28,12 +28,7 @@ void FileLoader::openFileDialog()
             {
                 this->setCurrentFile(fileName);
                 JsonSerializerVisitor serializer(fileContent);
-                auto history = serializer.visitHistory();
-                auto videos = history->getVideosSPtr();
-                for (auto it = videos.begin(); it != videos.end(); ++it)
-                {
-                    qDebug() << "Video title :" << (*it)->title();
-                }
+                history->init(serializer.visitHistory());
             }
             catch (const std::exception &e)
             {

@@ -10,7 +10,6 @@ class FileLoader : public QObject
     QML_ELEMENT
 
     Q_PROPERTY(QString fileName READ fileName WRITE setCurrentFile NOTIFY currentFileChanged)
-
 public:
     explicit FileLoader(QObject *parent = nullptr);
 
@@ -19,7 +18,7 @@ public slots:
 
     void setCurrentFile(const QString &fileName);
 
-    void openFileDialog();
+    void openFileDialog(History *history);
 
 signals:
     void currentFileChanged();

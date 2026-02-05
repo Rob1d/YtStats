@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Dialogs
-
+import App.History 1.0
 
 Item {
     width: 400
@@ -16,7 +16,7 @@ Item {
         text: "Loaded File " + fileLoader.fileName
         anchors.centerIn: parent
         onClicked: {
-            fileLoader.openFileDialog()
+            fileLoader.openFileDialog(History)
         }
     }
 }

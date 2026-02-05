@@ -19,3 +19,12 @@ QList<Video *> History::videos()
     }
     return videosAsQ;
 }
+
+void History::init(std::unique_ptr<History> history)
+{
+    this->_channels = std::move(history->_channels);
+    this->_videos = std::move(history->_videos);
+    emit this->channelsChanged();
+    emit this->videosChanged();
+    qDebug() << "History updated with " << this->_channels.size() << " channels and " << this->_videos.size() << " videos";
+}
